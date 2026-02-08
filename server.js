@@ -15,21 +15,27 @@ async function searchYouTube(query) {
     } catch (e) { return null; }
 }
 
-// --- 2. MANEJADOR DE ALEXA (LA ORDEN) ---
+// --- 2. MANEJADOR DE ALEXA ---
 app.post('/', async (req, res) => {
     const requestType = req.body.request.type;
     
+    // Verificación básica del Skill ID (opcional pero recomendada)
+    const skillId = req.body.session.application.applicationId;
+    if (process.env.ALEXA_SKILL_ID && skillId !== process.env.ALEXA_SKILL_ID) {
+        return res.status(403).send("Skill ID no autorizado");
+    }
+
     if (requestType === 'LaunchRequest') {
         return res.json(createResponse("YouTube listo. ¿Qué canción buscamos?"));
     }
 
-    if (requestType === 'IntentRequest' && req.body.request.intent.name === 'PlayVideoIntent') {
-        const query = req.body.request.intent.slots.VideoQuery.value;
+    // AJUSTADO: Ahora usa 'SearchIntent' y el slot 'query' como en tu JSON de Alexa
+    if (requestType === 'IntentRequest' && req.body.request.intent.name === 'SearchIntent') {
+        const query = req.body.request.intent.slots.query.value; // Coincide con tu JSON 
         const videoId = await searchYouTube(query);
 
         if (!videoId) return res.json(createResponse("No encontré el video."));
 
-        // IMPORTANTE: La URL que le damos a Alexa apunta a NUESTRO servidor, no a YT
         const myServerUrl = `https://${req.headers.host}/stream/${videoId}`;
 
         return res.json({
@@ -41,7 +47,7 @@ app.post('/', async (req, res) => {
                     playBehavior: "REPLACE_ALL",
                     audioItem: {
                         stream: {
-                            url: myServerUrl, // Alexa le pedirá el audio a tu Railway
+                            url: myServerUrl,
                             token: videoId,
                             offsetInMilliseconds: 0
                         }
@@ -53,8 +59,7 @@ app.post('/', async (req, res) => {
     }
 });
 
-// --- 3. EL TÚNEL DE AUDIO (EL FILTRO) ---
-// Aquí es donde ocurre la magia: Railway descarga y entrega el audio a la vez
+// --- 3. EL TÚNEL DE AUDIO ---
 app.get('/stream/:videoId', async (req, res) => {
     const videoId = req.params.videoId;
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
@@ -67,16 +72,13 @@ app.get('/stream/:videoId', async (req, res) => {
             quality: 'highestaudio',
             requestOptions: {
                 headers: {
-                    // Usamos tus cookies para que YouTube crea que somos un humano
+                    // Importante: Asegúrate de pegar el JSON de cookies en Railway
                     cookie: process.env.YOUTUBE_COOKIES || '' 
                 }
             }
         };
 
-        // Configuramos la respuesta como audio
         res.setHeader('Content-Type', 'audio/mpeg');
-        
-        // ytdl descarga -> pipe lo envía a Alexa en tiempo real
         ytdl(videoUrl, options).pipe(res);
 
     } catch (error) {
