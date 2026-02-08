@@ -1,6 +1,7 @@
 const express = require('express');
 const ytdl = require('@distube/ytdl-core');
 const axios = require('axios');
+const { PassThrough } = require('stream'); // Librería para el colchón de audio
 const app = express();
 
 app.use(express.json());
@@ -13,21 +14,16 @@ async function searchYouTube(query) {
         const match = data.match(/"videoId":"([^"]+)"/);
         return match ? match[1] : null;
     } catch (e) {
-        console.error("Error en búsqueda:", e.message);
         return null;
     }
 }
 
 // --- 2. MANEJADOR DE ALEXA ---
 app.post('/', async (req, res) => {
-    // Evita el error "Cannot read properties of undefined"
-    if (!req.body || !req.body.request) {
-        return res.status(400).send("Petición inválida");
-    }
+    if (!req.body || !req.body.request) return res.status(400).send("Inválido");
 
     const requestType = req.body.request.type;
 
-    // Validación de Skill ID (solo si existe sesión)
     if (req.body.session && req.body.session.application) {
         const skillId = req.body.session.application.applicationId;
         if (process.env.ALEXA_SKILL_ID && skillId !== process.env.ALEXA_SKILL_ID) {
@@ -36,22 +32,21 @@ app.post('/', async (req, res) => {
     }
 
     if (requestType === 'LaunchRequest') {
-        return res.json(createResponse("Servidor de música listo. ¿Qué quieres escuchar?"));
+        return res.json(createResponse("Listo. ¿Qué escuchamos?"));
     }
 
     if (requestType === 'IntentRequest' && req.body.request.intent.name === 'SearchIntent') {
         const query = req.body.request.intent.slots.query.value;
         const videoId = await searchYouTube(query);
 
-        if (!videoId) return res.json(createResponse("No encontré ese video."));
+        if (!videoId) return res.json(createResponse("No lo encontré."));
 
-        // Genera la URL de streaming usando el host actual
         const myServerUrl = `https://${req.headers.host}/stream/${videoId}`;
 
         return res.json({
             version: "1.0",
             response: {
-                outputSpeech: { type: "PlainText", text: `Tocando ${query}` },
+                outputSpeech: { type: "PlainText", text: `Poniendo ${query}` },
                 directives: [{
                     type: "AudioPlayer.Play",
                     playBehavior: "REPLACE_ALL",
@@ -67,44 +62,52 @@ app.post('/', async (req, res) => {
             }
         });
     }
-
     return res.json({ version: "1.0", response: { shouldEndSession: true } });
 });
 
-// --- 3. TÚNEL DE AUDIO OPTIMIZADO ---
+// --- 3. TÚNEL DE AUDIO CON BUFFER (PASSTHROUGH) ---
 app.get('/stream/:videoId', async (req, res) => {
     const videoId = req.params.videoId;
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-
-    console.log(`[TÚNEL] Streaming video: ${videoId}`);
+    
+    console.log(`[STREAM] Iniciando flujo estable para: ${videoId}`);
 
     try {
-        const options = {
+        const audioStream = ytdl(videoUrl, {
             filter: 'audioonly',
-            quality: 'lowestaudio', // Menor peso = menor lag
-            highWaterMark: 1 << 25, // Buffer de 32MB para evitar cortes
+            quality: 'lowestaudio',
+            highWaterMark: 1 << 25, // Buffer de 32MB
+            dlChunkSize: 1024 * 1024, // Pedazos de 1MB
             requestOptions: {
                 headers: {
                     cookie: process.env.YOUTUBE_COOKIES || '',
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 }
             }
-        };
-
-        res.setHeader('Content-Type', 'audio/mpeg');
-        
-        const stream = ytdl(videoUrl, options);
-
-        stream.on('error', (err) => {
-            console.error('[YTDL ERROR]', err.message);
-            if (!res.headersSent) res.status(500).end();
         });
 
-        stream.pipe(res);
+        // Creamos el puente para que el audio fluya sin tirones
+        const bufferBridge = new PassThrough();
+
+        res.setHeader('Content-Type', 'audio/mpeg');
+        res.setHeader('Transfer-Encoding', 'chunked');
+
+        audioStream.pipe(bufferBridge).pipe(res);
+
+        audioStream.on('error', (err) => {
+            console.error('[YTDL ERROR]', err.message);
+            bufferBridge.end();
+        });
+
+        req.on('close', () => {
+            audioStream.destroy();
+            bufferBridge.destroy();
+            console.log(`[STREAM] Conexión cerrada por el cliente.`);
+        });
 
     } catch (error) {
-        console.error(`[SERVER ERROR] ${error.message}`);
-        if (!res.headersSent) res.status(500).send("Error de streaming");
+        console.error(`[FATAL ERROR] ${error.message}`);
+        if (!res.headersSent) res.status(500).end();
     }
 });
 
@@ -113,4 +116,4 @@ function createResponse(text) {
 }
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 Túnel activo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor en puerto ${PORT}`));
