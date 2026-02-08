@@ -13,110 +13,81 @@ async function searchYouTube(query) {
         const { data } = await axios.get(url);
         const match = data.match(/"videoId":"([^"]+)"/);
         return match ? match[1] : null;
-    } catch (e) {
-        console.error("Error en búsqueda:", e.message);
-        return null;
-    }
+    } catch (e) { return null; }
 }
 
-// --- 2. MANEJADOR DE ALEXA (SOLUCIÓN AL ERROR 'APPLICATION') ---
+// --- 2. MANEJADOR DE ALEXA ---
 app.post('/', async (req, res) => {
-    // Validación crítica para evitar el TypeError visto en logs
     if (!req.body || !req.body.session || !req.body.session.application) {
-        console.log("[LOG] Petición no reconocida o mal formada de Alexa.");
+        console.log("[LOG] Petición no reconocida o mal formada de Alexa."); // Visto en logs
         return res.status(200).json({ version: "1.0", response: { shouldEndSession: true } });
     }
 
     const requestType = req.body.request.type;
-
     if (requestType === 'LaunchRequest') {
-        return res.json(createResponse("¡Hola! Soy tu servidor de música. ¿Qué canción quieres escuchar?"));
+        return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "Listo. ¿Qué escuchamos?" }, shouldEndSession: false } });
     }
 
     if (requestType === 'IntentRequest' && req.body.request.intent.name === 'SearchIntent') {
         const query = req.body.request.intent.slots.query.value;
         const videoId = await searchYouTube(query);
-
-        if (!videoId) return res.json(createResponse("No encontré ese video en YouTube."));
+        if (!videoId) return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "No lo encontré." } } });
 
         const myServerUrl = `https://${req.headers.host}/stream/${videoId}`;
-
         return res.json({
             version: "1.0",
             response: {
-                outputSpeech: { type: "PlainText", text: `Buscando y reproduciendo ${query}` },
+                outputSpeech: { type: "PlainText", text: `Poniendo ${query}` },
                 directives: [{
                     type: "AudioPlayer.Play",
                     playBehavior: "REPLACE_ALL",
-                    audioItem: {
-                        stream: {
-                            url: myServerUrl,
-                            token: videoId,
-                            offsetInMilliseconds: 0
-                        }
-                    }
+                    audioItem: { stream: { url: myServerUrl, token: videoId, offsetInMilliseconds: 0 } }
                 }],
                 shouldEndSession: true
             }
         });
     }
-
     return res.json({ version: "1.0", response: { shouldEndSession: true } });
 });
 
-// --- 3. TÚNEL DE AUDIO (SOLUCIÓN AL ERROR 'BOT' Y 'FORMAT') ---
+// --- 3. TÚNEL DE AUDIO (FIX: cookies must be a string) ---
 app.get('/stream/:videoId', async (req, res) => {
     const videoId = req.params.videoId;
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    
     console.log(`[TÚNEL] Iniciando flujo para: ${videoId}`);
 
     try {
-        // Parseamos las cookies del formato JSON Array para evitar el error 403
-        let cookies;
+        // Creamos el agente de seguridad con tus cookies JSON para saltar el error de BOT
+        let agent;
         try {
-            cookies = JSON.parse(process.env.YOUTUBE_COOKIES);
+            const cookieData = JSON.parse(process.env.YOUTUBE_COOKIES);
+            agent = ytdl.createAgent(cookieData); 
         } catch (e) {
-            cookies = process.env.YOUTUBE_COOKIES; // Si no es JSON, se usa como texto plano
+            console.error("Error al crear agente de cookies:", e.message);
         }
 
-        const options = {
+        const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, {
+            agent: agent, // Usamos el agente oficial para evitar el error 403
             filter: 'audioonly',
-            quality: 'highestaudio', // FIX: Evita el error "No such format found"
-            highWaterMark: 1 << 25,
-            requestOptions: {
-                headers: {
-                    cookie: cookies,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
-                }
-            }
-        };
+            quality: 'highestaudio', // Evita el error "No such format found"
+            highWaterMark: 1 << 25
+        });
 
         res.setHeader('Content-Type', 'audio/mpeg');
-        const bufferBridge = new PassThrough();
-        const stream = ytdl(videoUrl, options);
-
+        
         stream.on('error', (err) => {
-            console.error('[YTDL ERROR]', err.message); // Monitorea aquí el bloqueo de bot
+            console.error('[YTDL ERROR]', err.message);
             if (!res.headersSent) res.status(500).end();
         });
 
-        stream.pipe(bufferBridge).pipe(res);
+        stream.pipe(res);
 
-        req.on('close', () => {
-            stream.destroy();
-            bufferBridge.destroy();
-        });
+        req.on('close', () => { stream.destroy(); });
 
     } catch (error) {
-        console.error(`[STREAM ERROR] ${error.message}`);
-        if (!res.headersSent) res.status(500).send("Error de streaming");
+        console.error(`[FATAL] ${error.message}`);
+        if (!res.headersSent) res.status(500).end();
     }
 });
-
-function createResponse(text) {
-    return { version: "1.0", response: { outputSpeech: { type: "PlainText", text: text }, shouldEndSession: false } };
-}
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => console.log(`🚀 Túnel activo en puerto ${PORT}`));
