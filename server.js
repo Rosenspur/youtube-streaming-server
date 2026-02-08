@@ -1,7 +1,7 @@
 const express = require('express');
 const ytdl = require('@distube/ytdl-core');
 const axios = require('axios');
-const { PassThrough } = require('stream'); // Librería para el colchón de audio
+const { PassThrough } = require('stream');
 const app = express();
 
 app.use(express.json());
@@ -32,21 +32,21 @@ app.post('/', async (req, res) => {
     }
 
     if (requestType === 'LaunchRequest') {
-        return res.json(createResponse("Listo. ¿Qué escuchamos?"));
+        return res.json(createResponse("Sistema de audio listo. ¿Qué canción busco?"));
     }
 
     if (requestType === 'IntentRequest' && req.body.request.intent.name === 'SearchIntent') {
         const query = req.body.request.intent.slots.query.value;
         const videoId = await searchYouTube(query);
 
-        if (!videoId) return res.json(createResponse("No lo encontré."));
+        if (!videoId) return res.json(createResponse("Lo siento, no encontré resultados."));
 
         const myServerUrl = `https://${req.headers.host}/stream/${videoId}`;
 
         return res.json({
             version: "1.0",
             response: {
-                outputSpeech: { type: "PlainText", text: `Poniendo ${query}` },
+                outputSpeech: { type: "PlainText", text: `Reproduciendo ${query}` },
                 directives: [{
                     type: "AudioPlayer.Play",
                     playBehavior: "REPLACE_ALL",
@@ -65,32 +65,32 @@ app.post('/', async (req, res) => {
     return res.json({ version: "1.0", response: { shouldEndSession: true } });
 });
 
-// --- 3. TÚNEL DE AUDIO CON BUFFER (PASSTHROUGH) ---
+// --- 3. TÚNEL DE AUDIO M4A (MÁXIMA COMPATIBILIDAD) ---
 app.get('/stream/:videoId', async (req, res) => {
     const videoId = req.params.videoId;
     const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
     
-    console.log(`[STREAM] Iniciando flujo estable para: ${videoId}`);
+    console.log(`[STREAMING] Intentando flujo M4A para: ${videoId}`);
 
     try {
         const audioStream = ytdl(videoUrl, {
-            filter: 'audioonly',
+            filter: (format) => format.container === 'm4a' && !format.hasVideo,
             quality: 'lowestaudio',
-            highWaterMark: 1 << 25, // Buffer de 32MB
-            dlChunkSize: 1024 * 1024, // Pedazos de 1MB
+            highWaterMark: 1 << 25,
             requestOptions: {
                 headers: {
                     cookie: process.env.YOUTUBE_COOKIES || '',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
                 }
             }
         });
 
-        // Creamos el puente para que el audio fluya sin tirones
         const bufferBridge = new PassThrough();
 
-        res.setHeader('Content-Type', 'audio/mpeg');
-        res.setHeader('Transfer-Encoding', 'chunked');
+        // Cabeceras específicas para evitar que Alexa corte el flujo
+        res.setHeader('Content-Type', 'audio/mp4');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.setHeader('Connection', 'keep-alive');
 
         audioStream.pipe(bufferBridge).pipe(res);
 
@@ -102,7 +102,7 @@ app.get('/stream/:videoId', async (req, res) => {
         req.on('close', () => {
             audioStream.destroy();
             bufferBridge.destroy();
-            console.log(`[STREAM] Conexión cerrada por el cliente.`);
+            console.log(`[LOG] Streaming finalizado o cancelado.`);
         });
 
     } catch (error) {
@@ -116,4 +116,4 @@ function createResponse(text) {
 }
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`🚀 Servidor en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor activo en puerto ${PORT}`));
