@@ -10,71 +10,81 @@ app.use(express.json());
 async function searchYouTube(query) {
     try {
         const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
-        const { data } = await axios.get(url);
+        const { data } = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
         const match = data.match(/"videoId":"([^"]+)"/);
         return match ? match[1] : null;
     } catch (e) { return null; }
 }
 
-// --- 2. MANEJADOR DE ALEXA ---
+// --- 2. MANEJADOR DE ALEXA (SOLUCIÓN A PETICIONES MALFORMADAS) ---
 app.post('/', async (req, res) => {
-    if (!req.body || !req.body.session || !req.body.session.application) {
-        console.log("[LOG] Petición no reconocida o mal formada de Alexa."); // Visto en logs
+    // Evita el crash que vimos en los logs de las 14:24 y 14:26
+    if (!req.body || !req.body.request) {
+        console.log("[LOG] Petición no reconocida o mal formada de Alexa.");
         return res.status(200).json({ version: "1.0", response: { shouldEndSession: true } });
     }
 
     const requestType = req.body.request.type;
+
     if (requestType === 'LaunchRequest') {
-        return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "Listo. ¿Qué escuchamos?" }, shouldEndSession: false } });
+        return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "Servidor musical listo. ¿Qué canción buscamos?" }, shouldEndSession: false } });
     }
 
     if (requestType === 'IntentRequest' && req.body.request.intent.name === 'SearchIntent') {
         const query = req.body.request.intent.slots.query.value;
         const videoId = await searchYouTube(query);
-        if (!videoId) return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "No lo encontré." } } });
+        
+        if (!videoId) {
+            return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "No encontré resultados." }, shouldEndSession: true } });
+        }
 
-        const myServerUrl = `https://${req.headers.host}/stream/${videoId}`;
+        const streamUrl = `https://${req.headers.host}/stream/${videoId}`;
         return res.json({
             version: "1.0",
             response: {
-                outputSpeech: { type: "PlainText", text: `Poniendo ${query}` },
+                outputSpeech: { type: "PlainText", text: `Reproduciendo ${query}` },
                 directives: [{
                     type: "AudioPlayer.Play",
                     playBehavior: "REPLACE_ALL",
-                    audioItem: { stream: { url: myServerUrl, token: videoId, offsetInMilliseconds: 0 } }
+                    audioItem: { stream: { url: streamUrl, token: videoId, offsetInMilliseconds: 0 } }
                 }],
                 shouldEndSession: true
             }
         });
     }
+
     return res.json({ version: "1.0", response: { shouldEndSession: true } });
 });
 
-// --- 3. TÚNEL DE AUDIO (FIX: cookies must be a string) ---
+// --- 3. TÚNEL DE AUDIO (SOLUCIÓN AL ERROR 403 Y COOKIES) ---
 app.get('/stream/:videoId', async (req, res) => {
     const videoId = req.params.videoId;
     console.log(`[TÚNEL] Iniciando flujo para: ${videoId}`);
 
     try {
-        // Creamos el agente de seguridad con tus cookies JSON para saltar el error de BOT
         let agent;
+        const rawCookies = process.env.YOUTUBE_COOKIES;
+
         try {
-            const cookieData = JSON.parse(process.env.YOUTUBE_COOKIES);
-            agent = ytdl.createAgent(cookieData); 
+            // Si es JSON (la línea larga que te pasé), lo parseamos
+            const cookieData = JSON.parse(rawCookies);
+            agent = ytdl.createAgent(cookieData);
         } catch (e) {
-            console.error("Error al crear agente de cookies:", e.message);
+            // Si no es JSON (formato Netscape), lo usamos como string
+            agent = ytdl.createAgent(rawCookies);
         }
 
         const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, {
-            agent: agent, // Usamos el agente oficial para evitar el error 403
+            agent: agent,
             filter: 'audioonly',
-            quality: 'highestaudio', // Evita el error "No such format found"
+            quality: 'highestaudio', // FIX: Evita el error 'lowestaudio'
             highWaterMark: 1 << 25
         });
 
         res.setHeader('Content-Type', 'audio/mpeg');
         
         stream.on('error', (err) => {
+            // Aquí monitoreamos el Status 403 visto en logs
             console.error('[YTDL ERROR]', err.message);
             if (!res.headersSent) res.status(500).end();
         });
