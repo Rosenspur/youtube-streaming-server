@@ -55,33 +55,33 @@ app.get('/stream/:videoId', async (req, res) => {
 
     try {
         let agent;
-        const cookieVar = process.env.YOUTUBE_COOKIES;
+        const rawCookies = process.env.YOUTUBE_COOKIES;
 
-        // Intentamos crear el agente. Esto soluciona el "cookies must be a string"
+        // Intentamos crear el agente de seguridad
         try {
-            const parsed = JSON.parse(cookieVar);
-            agent = ytdl.createAgent(parsed); 
+            const cookieData = JSON.parse(rawCookies);
+            agent = ytdl.createAgent(cookieData); 
         } catch (e) {
-            // Si no es JSON, lo intentamos como string (formato Netscape)
-            agent = ytdl.createAgent(cookieVar);
+            // Si no es JSON, lo intenta como texto (Netscape)
+            agent = ytdl.createAgent(rawCookies);
         }
 
         const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, {
-            agent: agent,
+            agent: agent, // El agente es vital para evitar el 403
             filter: 'audioonly',
-            quality: 'highestaudio', // Evita el error "No such format found"
+            quality: 'highestaudio',
             highWaterMark: 1 << 25
         });
 
         res.setHeader('Content-Type', 'audio/mpeg');
+        stream.pipe(res);
+
         stream.on('error', (err) => {
-            console.error('[YTDL ERROR]', err.message); // Aquí veremos si persiste el 403
+            console.error('[YTDL ERROR]', err.message);
             if (!res.headersSent) res.status(500).end();
         });
 
-        stream.pipe(res);
         req.on('close', () => stream.destroy());
-
     } catch (error) {
         console.error(`[FATAL] ${error.message}`);
         if (!res.headersSent) res.status(500).end();
