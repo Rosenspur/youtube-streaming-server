@@ -17,21 +17,29 @@ async function searchYouTube(query) {
 
 // --- 2. MANEJADOR DE ALEXA ---
 app.post('/', async (req, res) => {
+    // PROTECCIÓN: Verificamos que la petición tenga el cuerpo esperado de Alexa
+    if (!req.body || !req.body.request) {
+        return res.status(400).send("Petición no válida");
+    }
+
     const requestType = req.body.request.type;
     
-    // Verificación básica del Skill ID (opcional pero recomendada)
-    const skillId = req.body.session.application.applicationId;
-    if (process.env.ALEXA_SKILL_ID && skillId !== process.env.ALEXA_SKILL_ID) {
-        return res.status(403).send("Skill ID no autorizado");
+    // VALIDACIÓN SEGURA DEL SKILL ID
+    // Si la sesión existe, verificamos el ID. Si no existe (como en el simulador a veces), saltamos.
+    if (req.body.session && req.body.session.application) {
+        const skillId = req.body.session.application.applicationId;
+        if (process.env.ALEXA_SKILL_ID && skillId !== process.env.ALEXA_SKILL_ID) {
+            console.log("ALERTA: Skill ID no coincide");
+            return res.status(403).send("Skill ID no autorizado");
+        }
     }
 
     if (requestType === 'LaunchRequest') {
         return res.json(createResponse("YouTube listo. ¿Qué canción buscamos?"));
     }
 
-    // AJUSTADO: Ahora usa 'SearchIntent' y el slot 'query' como en tu JSON de Alexa
     if (requestType === 'IntentRequest' && req.body.request.intent.name === 'SearchIntent') {
-        const query = req.body.request.intent.slots.query.value; // Coincide con tu JSON 
+        const query = req.body.request.intent.slots.query.value;
         const videoId = await searchYouTube(query);
 
         if (!videoId) return res.json(createResponse("No encontré el video."));
@@ -72,7 +80,7 @@ app.get('/stream/:videoId', async (req, res) => {
             quality: 'highestaudio',
             requestOptions: {
                 headers: {
-                    // Importante: Asegúrate de pegar el JSON de cookies en Railway
+                    // Usamos las cookies procesadas del JSON
                     cookie: process.env.YOUTUBE_COOKIES || '' 
                 }
             }
