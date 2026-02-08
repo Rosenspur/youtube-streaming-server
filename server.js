@@ -1,12 +1,11 @@
 const express = require('express');
 const ytdl = require('@distube/ytdl-core');
 const axios = require('axios');
-const { PassThrough } = require('stream');
 const app = express();
 
 app.use(express.json());
 
-// --- 1. FUNCIÓN DE BÚSQUEDA ---
+// --- 1. BÚSQUEDA ---
 async function searchYouTube(query) {
     try {
         const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
@@ -16,43 +15,36 @@ async function searchYouTube(query) {
     } catch (e) { return null; }
 }
 
-// --- 2. MANEJADOR DE ALEXA (SOLUCIÓN A PETICIONES MALFORMADAS) ---
+// --- 2. MANEJADOR DE ALEXA ---
 app.post('/', async (req, res) => {
-    // Evita el crash que vimos en los logs de las 14:24 y 14:26
+    // Validación robusta para evitar "Petición mal formada"
     if (!req.body || !req.body.request) {
-        console.log("[LOG] Petición no reconocida o mal formada de Alexa.");
         return res.status(200).json({ version: "1.0", response: { shouldEndSession: true } });
     }
 
     const requestType = req.body.request.type;
-
     if (requestType === 'LaunchRequest') {
-        return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "Servidor musical listo. ¿Qué canción buscamos?" }, shouldEndSession: false } });
+        return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "Listo. ¿Qué escuchamos?" }, shouldEndSession: false } });
     }
 
     if (requestType === 'IntentRequest' && req.body.request.intent.name === 'SearchIntent') {
         const query = req.body.request.intent.slots.query.value;
         const videoId = await searchYouTube(query);
-        
-        if (!videoId) {
-            return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "No encontré resultados." }, shouldEndSession: true } });
-        }
+        if (!videoId) return res.json({ version: "1.0", response: { outputSpeech: { type: "PlainText", text: "No lo encontré." } } });
 
-        const streamUrl = `https://${req.headers.host}/stream/${videoId}`;
         return res.json({
             version: "1.0",
             response: {
-                outputSpeech: { type: "PlainText", text: `Reproduciendo ${query}` },
+                outputSpeech: { type: "PlainText", text: `Poniendo ${query}` },
                 directives: [{
                     type: "AudioPlayer.Play",
                     playBehavior: "REPLACE_ALL",
-                    audioItem: { stream: { url: streamUrl, token: videoId, offsetInMilliseconds: 0 } }
+                    audioItem: { stream: { url: `https://${req.headers.host}/stream/${videoId}`, token: videoId, offsetInMilliseconds: 0 } }
                 }],
                 shouldEndSession: true
             }
         });
     }
-
     return res.json({ version: "1.0", response: { shouldEndSession: true } });
 });
 
@@ -63,35 +55,32 @@ app.get('/stream/:videoId', async (req, res) => {
 
     try {
         let agent;
-        const rawCookies = process.env.YOUTUBE_COOKIES;
+        const cookieVar = process.env.YOUTUBE_COOKIES;
 
+        // Intentamos crear el agente. Esto soluciona el "cookies must be a string"
         try {
-            // Si es JSON (la línea larga que te pasé), lo parseamos
-            const cookieData = JSON.parse(rawCookies);
-            agent = ytdl.createAgent(cookieData);
+            const parsed = JSON.parse(cookieVar);
+            agent = ytdl.createAgent(parsed); 
         } catch (e) {
-            // Si no es JSON (formato Netscape), lo usamos como string
-            agent = ytdl.createAgent(rawCookies);
+            // Si no es JSON, lo intentamos como string (formato Netscape)
+            agent = ytdl.createAgent(cookieVar);
         }
 
         const stream = ytdl(`https://www.youtube.com/watch?v=${videoId}`, {
             agent: agent,
             filter: 'audioonly',
-            quality: 'highestaudio', // FIX: Evita el error 'lowestaudio'
+            quality: 'highestaudio', // Evita el error "No such format found"
             highWaterMark: 1 << 25
         });
 
         res.setHeader('Content-Type', 'audio/mpeg');
-        
         stream.on('error', (err) => {
-            // Aquí monitoreamos el Status 403 visto en logs
-            console.error('[YTDL ERROR]', err.message);
+            console.error('[YTDL ERROR]', err.message); // Aquí veremos si persiste el 403
             if (!res.headersSent) res.status(500).end();
         });
 
         stream.pipe(res);
-
-        req.on('close', () => { stream.destroy(); });
+        req.on('close', () => stream.destroy());
 
     } catch (error) {
         console.error(`[FATAL] ${error.message}`);
